@@ -1,0 +1,5 @@
+I want to test my website login functionality 
+1. go to playwright.microsoft.com
+2. Click on sign in button 
+3. Enter email pass word 
+4. if login succesfull report succes 
