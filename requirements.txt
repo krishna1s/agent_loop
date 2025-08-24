@@ -1,0 +1,21 @@
+# Website Exploration Agent Requirements
+# Install with: pip install -r requirements_website_explorer.txt
+
+# Core AutoGen and Chainlit dependencies
+chainlit>=2.6.0
+autogen-agentchat>=0.7.1
+autogen-ext[openai,azure]>=0.7.1
+azure-identity>=1.23.0
+
+# Additional dependencies for enhanced functionality
+aiofiles>=24.1.0
+python-dotenv>=1.1.0
+pathlib2>=2.3.7
+
+# Real Playwright browser automation (HEADED MODE)
+playwright>=1.40.0
+mcp-playwright>=0.1.0
+
+# Development and debugging
+# pytest>=8.0.0
+# pytest-asyncio>=0.23.0
