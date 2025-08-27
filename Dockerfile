@@ -3,7 +3,7 @@ FROM ubuntu:22.04
 # Set non-interactive mode for apt
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
+# Install system dependencies (no nodejs/npm here)
 RUN apt-get update && apt-get install -y \
     python3.11 python3.11-venv python3.11-distutils python3-pip \
     curl git build-essential \
@@ -14,6 +14,14 @@ RUN apt-get update && apt-get install -y \
     libxdamage1 libxrandr2 xdg-utils libu2f-udev libvulkan1 \
     supervisor nginx \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 20 (or 22/23 if available) for Playwright MCP
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    node --version && npm --version
+
+# Install Playwright MCP globally
+RUN npm install -g @playwright/mcp@latest
 
 # Set python3.11 as default
 RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && ln -sf /usr/bin/pip3 /usr/bin/pip
