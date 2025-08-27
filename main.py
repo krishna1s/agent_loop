@@ -35,7 +35,7 @@ from autogen_ext.tools.mcp import McpWorkbench, SseServerParams
 from azure.identity import DefaultAzureCredential
 
 # Import our custom orchestrator
-from TestingAgent import ProgressOnlyMagenticOneGroupChat
+from TestingAgent import CustomMagneticOneGroupChat
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -306,7 +306,7 @@ async def get_filtered_team(user_input_func: Callable[[str, Optional[Cancellatio
         )
 
         # Create the ProgressOnly MagenticOneGroupChat directly
-        team = ProgressOnlyMagenticOneGroupChat(
+        team = CustomMagneticOneGroupChat(
             [agent, user_proxy],
             model_client=website_agent.model_client,
             max_turns=20,
@@ -583,19 +583,153 @@ async def _orchestrator_only_run_stream(team, task: str):
             logger.exception("Error while filtering orchestrator stream event")
             continue
 
-if __name__ == "__main__":
-    print("🚀 Starting AutoGen MagenticOne Team with Prompt-Based Progress Filtering + Chainlit...")
-    print("🌐 Chainlit app will be available at: http://localhost:8000")
-    print("📋 Features:")
-    print("  - Prompt-enhanced Magnetic One orchestrator with AI-generated progress summaries")
-    print("  - Clean, structured progress updates (Just Completed / Currently Doing / Next Step)")
-    print("  - Orchestrator-only message display (sub-agent messages filtered out)")
-    print("  - Playwright MCP integration for live browser automation")
-    print("  - Interactive chat interface with Chainlit")
-    print("  - Contextual AI-driven progress updates instead of hardcoded keywords")
-    print("  - Smart orchestration with user-friendly communication")
-    print()
-    
-    # Run chainlit from virtual environment
-    import subprocess
-    subprocess.run(["/Users/krishnachandak/Documents/repos/testing-autogen/env/bin/chainlit", "run", __file__, "--port", "8000"])
+
+# --- FastAPI API for programmatic access ---
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel as PydanticBaseModel
+
+# Only create FastAPI app if not running under Chainlit
+import sys
+if "chainlit" not in sys.argv[0]:
+    app = FastAPI()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    class TaskRequest(PydanticBaseModel):
+        message: str
+
+
+    # In-memory task store: {task_id: {"status": str, "progress": [messages], "created_at": datetime, ...}}
+    import uuid
+    from typing import Dict
+    task_store: Dict[str, dict] = {}
+
+
+    class TaskStatus(str):
+        PENDING = "pending"
+        RUNNING = "running"
+        WAITING_FOR_INPUT = "waiting_for_input"
+        COMPLETED = "completed"
+        ERROR = "error"
+
+
+    @app.post("/task")
+    async def create_task(req: TaskRequest):
+        """Create a new orchestrator task. Returns a task_id."""
+        task_id = str(uuid.uuid4())
+        task_store[task_id] = {
+            "status": TaskStatus.PENDING,
+            "progress": [],
+            "created_at": datetime.now().isoformat(),
+            "error": None,
+            "input_prompt": None,
+            "input_response": None,
+            "_resume_event": asyncio.Event(),
+        }
+
+        async def user_input_func(prompt: str, cancellation_token: CancellationToken | None) -> str:
+            # Set status to waiting, store prompt, and wait for resume
+            task_store[task_id]["status"] = TaskStatus.WAITING_FOR_INPUT
+            task_store[task_id]["input_prompt"] = prompt
+            task_store[task_id]["_resume_event"].clear()
+            await task_store[task_id]["_resume_event"].wait()
+            # After resume, return the provided input
+            return task_store[task_id]["input_response"] or ""
+
+        async def run_orchestrator_task(task_id, user_message):
+            try:
+                task_store[task_id]["status"] = TaskStatus.RUNNING
+                team = await get_filtered_team(user_input_func)
+                text_message = TextMessage(content=user_message, source="user")
+                stream = _orchestrator_only_run_stream(team, task=text_message)
+                async for msg in stream:
+                    response_obj = getattr(msg, 'response', None)
+                    if response_obj is not None and getattr(response_obj, 'chat_message', None) is not None:
+                        inner_msg = response_obj.chat_message
+                        message_data = safe_model_dump(inner_msg)
+                    else:
+                        message_data = safe_model_dump(msg)
+                    # If this is a UserInputRequestedEvent, status will be set by user_input_func
+                    if isinstance(msg, UserInputRequestedEvent):
+                        # Progress and prompt already handled in user_input_func
+                        pass
+                    else:
+                        task_store[task_id]["progress"].append(message_data)
+                # Only set to completed if not waiting for input
+                if task_store[task_id]["status"] != TaskStatus.WAITING_FOR_INPUT:
+                    task_store[task_id]["status"] = TaskStatus.COMPLETED
+            except Exception as e:
+                logger.error(f"Error in task {task_id}: {e}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                task_store[task_id]["status"] = TaskStatus.ERROR
+                task_store[task_id]["error"] = str(e)
+
+        # Start the orchestrator task in the background
+        asyncio.create_task(run_orchestrator_task(task_id, req.message))
+        return {"task_id": task_id, "status": TaskStatus.PENDING}
+
+    class InputRequest(PydanticBaseModel):
+        input: str
+
+    @app.post("/task/{task_id}/input")
+    async def provide_input(task_id: str, req: InputRequest):
+        """Provide input to a waiting task and resume it. Also log the input in progress."""
+        task = task_store.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        if task["status"] != TaskStatus.WAITING_FOR_INPUT:
+            raise HTTPException(status_code=400, detail="Task is not waiting for input")
+        task["input_response"] = req.input
+        # Log the user input as a progress event
+        task["progress"].append({
+            "type": "UserInputResponse",
+            "source": "user",
+            "content": req.input,
+            "created_at": datetime.now().isoformat()
+        })
+        task["_resume_event"].set()
+        # Set status back to running
+        task["status"] = TaskStatus.RUNNING
+        return {"task_id": task_id, "status": TaskStatus.RUNNING}
+
+    @app.get("/task/{task_id}")
+    async def get_task_status(task_id: str):
+        """Get the status and progress of a task by task_id."""
+        task = task_store.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return {
+            "task_id": task_id,
+            "status": task["status"],
+            "progress": task["progress"],
+            "created_at": task["created_at"],
+            "error": task.get("error"),
+            "input_prompt": task.get("input_prompt"),
+        }
+
+    if __name__ == "__main__":
+        import uvicorn
+        print("🚀 Starting FastAPI app for MagenticOne orchestrator APIs...")
+        uvicorn.run(app, host="0.0.0.0", port=8002)
+else:
+    if __name__ == "__main__":
+        print("🚀 Starting AutoGen MagenticOne Team with Prompt-Based Progress Filtering + Chainlit...")
+        print("🌐 Chainlit app will be available at: http://localhost:8000")
+        print("📋 Features:")
+        print("  - Prompt-enhanced Magnetic One orchestrator with AI-generated progress summaries")
+        print("  - Clean, structured progress updates (Just Completed / Currently Doing / Next Step)")
+        print("  - Orchestrator-only message display (sub-agent messages filtered out)")
+        print("  - Playwright MCP integration for live browser automation")
+        print("  - Interactive chat interface with Chainlit")
+        print("  - Contextual AI-driven progress updates instead of hardcoded keywords")
+        print("  - Smart orchestration with user-friendly communication")
+        print()
+        # Run chainlit from virtual environment
+        import subprocess
+        subprocess.run(["/Users/krishnachandak/Documents/repos/testing-autogen/env/bin/chainlit", "run", __file__, "--port", "8000"])

@@ -18,7 +18,7 @@ from autogen_agentchat.base import Response
 logger = logging.getLogger(__name__)
 
 
-class ProgressOnlyMagenticOneOrchestrator(MagenticOneOrchestrator):
+class CustomMagneticOrchestrator(MagenticOneOrchestrator):
     """Subclass of MagenticOneOrchestrator that instructs the model to return
     a single compact JSON progress ledger and to put the user-visible text in a
     strict "PROGRESS UPDATE" format.
@@ -154,7 +154,7 @@ Example output (replace with current state):
         )
 
 
-class ProgressOnlyMagenticOneGroupChat(MagenticOneGroupChat):
+class CustomMagneticOneGroupChat(MagenticOneGroupChat):
     """Group chat class that wires the ProgressOnly orchestrator.
 
     Use this class wherever you previously used MagenticOneGroupChat to get the same
@@ -173,12 +173,12 @@ class ProgressOnlyMagenticOneGroupChat(MagenticOneGroupChat):
         termination_condition: Any,
         max_turns: int | None,
         message_factory: Any,
-    ) -> Callable[[], ProgressOnlyMagenticOneOrchestrator]:
+    ) -> Callable[[], CustomMagneticOrchestrator]:
         """Return a factory that constructs our ProgressOnly orchestrator with the
         same constructor shape as the original group chat.
         """
 
-        return lambda: ProgressOnlyMagenticOneOrchestrator(
+        return lambda: CustomMagneticOrchestrator(
             name,
             group_topic_type,
             output_topic_type,

@@ -1,9 +1,9 @@
-from .progress_only_magentic import (
-    ProgressOnlyMagenticOneOrchestrator,
-    ProgressOnlyMagenticOneGroupChat,
+from .custom_magnetic_orchestrator import (
+    CustomMagneticOrchestrator,
+    CustomMagneticOneGroupChat,
 )
 
 __all__ = [
-    "ProgressOnlyMagenticOneOrchestrator",
-    "ProgressOnlyMagenticOneGroupChat",
+    "CustomMagneticOrchestrator",
+    "CustomMagneticOneGroupChat",
 ]

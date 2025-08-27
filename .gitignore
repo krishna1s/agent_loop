@@ -412,3 +412,5 @@ playwright/.auth/
 .chainlit
 chat_threads.db
 chat.sqlite3
+
+backup/*

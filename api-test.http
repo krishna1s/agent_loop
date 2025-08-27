@@ -1,0 +1,22 @@
+### Sample .http file for testing FastAPI endpoints
+
+# 1. Create a new task
+POST http://localhost:8002/task
+Content-Type: application/json
+
+{
+  "message": "I want to test my website login functionality\\ngo to playwright.microsoft.com\\nClick on sign in button\\nEnter email pass word\\nif login succesfull report succes\\nDon't use existing loggedIn account go through email and password flow"
+}
+
+###
+# 2. Get task status and progress (replace TASK_ID with the actual id from above)
+GET http://localhost:8002/task/e2070660-c751-4911-ab6e-5dc6d2583fdd
+
+###
+# 3. Provide user input if task is waiting for input (replace TASK_ID)
+POST http://localhost:8002/task/e2070660-c751-4911-ab6e-5dc6d2583fdd/input
+Content-Type: application/json
+
+{
+  "input": "Use my credentials to check the login flow pwtest@puneet0288hotmail.onmicrosoft.com and password XXX"
+}
