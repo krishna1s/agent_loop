@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-AutoGen Team with Chainlit Integration
-Converts the FastAPI/WebSocket app_team.py to use Chainlit for a cleaner chat interface
-while maintaining all the existing AutoGen MagenticOneGroupChat functionality.
+TestingAgent Chainlit entrypoint using the ProgressOnly Magentic-One orchestrator.
+
+This app initializes an AssistantAgent with MCP Playwright tools and runs a
+ProgressOnlyMagenticOneGroupChat so the UI receives concise, structured
+"PROGRESS UPDATE" messages emitted by the orchestrator only.
 """
 
 import json
@@ -13,12 +15,16 @@ import traceback
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 from pathlib import Path
+from autogen_ext.agents.azure._azure_ai_agent import AzureAIAgent
+from azure.ai.projects.aio import AIProjectClient
+from azure.identity.aio import DefaultAzureCredential
+
+import time
 
 # Chainlit imports
 import chainlit as cl
 
 # AutoGen imports
-from autogen_agentchat.teams import MagenticOneGroupChat
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_agentchat.base import TaskResult
 from autogen_agentchat.messages import TextMessage, UserInputRequestedEvent, ModelClientStreamingChunkEvent
@@ -27,6 +33,9 @@ from autogen_ext.models.openai import AzureOpenAIChatCompletionClient
 from autogen_ext.auth.azure import AzureTokenProvider
 from autogen_ext.tools.mcp import McpWorkbench, SseServerParams
 from azure.identity import DefaultAzureCredential
+
+# Import our custom orchestrator
+from TestingAgent import ProgressOnlyMagenticOneGroupChat
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -38,7 +47,12 @@ from pydantic import BaseModel
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("AutoGenChainlit")
+
+logging.basicConfig(level=logging.INFO)
+for logger_name in logging.root.manager.loggerDict:
+    logging.getLogger(logger_name).setLevel(logging.INFO)
+
+logger = logging.getLogger("AutoGenChainlitFiltered")
 
 class DateTimeJSONEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles datetime objects."""
@@ -180,6 +194,19 @@ class WebsiteExploreAgent:
                 model_client_stream=True
             )
             
+            project_client = AIProjectClient(  # type: ignore
+                credential=DefaultAzureCredential(), endpoint="https://foundyuedn.services.ai.azure.com/api/projects/projectuedn"
+            )
+
+            # self.azure_Agent  = AzureAIAgent(
+            #     name="bing_agent",
+            #     description="An AI assistant with Bing grounding",
+            #     project_client=project_client,
+            #     deployment_name="gpt-4o",
+            #     instructions="You are a helpful assistant.",
+            #     workbench=self.workbench,
+            #     metadata={"source": "AzureAIAgent"},
+            # )
             print("✅ AutoGen agent initialized with MCP Playwright tools")
             
             return True
@@ -206,25 +233,24 @@ class WebsiteExploreAgent:
         """Create the comprehensive system message for the agent"""
         return '''You are an autonomous Test Exploration Agent that generates detailed test cases from high-level user instructions using MCP Playwright tools.
 
-Your thinking should be thorough and so it's fine if it's very long. You can think step by step before and after each action you decide to take.
-
-You MUST iterate and keep going until the problem is solved.
+Be concise in progress updates that are emitted to the UI. Your internal reasoning can be thorough, but only concise progress summaries should be shown to the user. Do NOT emit chain-of-thought or detailed sub-agent logs to the UI.
 
 Your goals:
-1. Take simple user test steps and autonomously explore the target website using available MCP tools.
-2. Keep working in a loop until you can produce a fully enhanced, detailed test plan with preconditions, step-by-step actions, and expected results.
-3. After every meaningful action or decision (navigation, click, type, wait, error, or discovery), inform user of your progress :
-   - Example: "Navigated to login page.", "Clicked 'Sign In' button.", "Waiting for dashboard to load.", "Could not find element, taking snapshot and retrying.", etc.
-4. Use snapshots to dynamically discover new elements if a selector or action fails.
-5. Never stop prematurely: if a step is unclear, attempt different flows (navigation, click, type, select, evaluate).
-6. If clarification or missing test data is required, then ask user for input
-    once you receive input, continue with the iteration.
-7. Return the final documentation in Markdown format.
-8. Always include Preconditions, Test Steps, and Expected Results (like an enhanced test case).
+1. Take simple user test steps and autonomously explore the target website using available MCP tools. 
+2. Keep working in a loop until you can produce a fully enhanced, detailed test plan with Preconditions, Test Steps (step-by-step actions), and Expected Results.
+3. After every meaningful action or decision (navigation, click, type, wait, error, or discovery), provide a brief progress update such as:
+   - "Navigated to login page."
+   - "Clicked 'Sign In' button."
+   - "Waiting for dashboard to load."
+   - "Could not find element, taking snapshot and retrying."
+4. Capture screenshots sparingly: take screenshots only when necessary for debugging, evidence, or when you need to inspect HTML attributes. Do NOT take screenshots after every minor action.
+5. Use `mcp_playwright_browser_snapshot` only when you need to inspect element attributes or when a selector fails to locate an element. Use snapshots selectively to aid element discovery.
+6. If clarification or missing test data is required, ask the user for input and then continue once the user responds.
+7. Return the final documentation in Markdown format and include Preconditions, Test Steps, and Expected Results.
 
 ### 🔹 Available MCP Tools
 
-Use the following MCP tools for browser automation:
+Use the following MCP tools for browser exploration:
 - mcp_playwright_browser_navigate: Navigate to URLs
 - mcp_playwright_browser_snapshot: Capture page snapshots for element discovery
 - mcp_playwright_browser_click: Click on elements
@@ -247,51 +273,54 @@ Use the following MCP tools for browser automation:
   - If element not found → use mcp_playwright_browser_snapshot, retry with updated selector, and report progress.
   - If blocked → ask user for futher input
 
-You are an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user. Only terminate your turn when you are sure that the problem is solved.
 
-- Continue until the test flow is completed end-to-end.
-- Save a structured enhanced test case (Markdown).'''
+IMPORTANT: Keep your progress updates concise and focused on actions taken. The orchestrator will handle the formatting for the UI.'''
 
 # Global variables for team management
 website_agent = None
-team = None
+progress_manager = None
 state_path = "team_state.json"
 history_path = "team_history.json"
 
-async def get_team(user_input_func: Callable[[str, Optional[CancellationToken]], Awaitable[str]]) -> MagenticOneGroupChat:
-    """Create and return the AutoGen team with user input function"""
-    global website_agent
-    
+
+# No progress checklist or aggregation: show orchestrator output directly
+
+async def get_filtered_team(user_input_func: Callable[[str, Optional[CancellationToken]], Awaitable[str]]) -> Any:
+    """Create and return a ProgressOnly MagenticOne team with user input function"""
+    global website_agent, progress_manager
     try:
         # Initialize the WebsiteExploreAgent if not already done
         if website_agent is None:
             website_agent = WebsiteExploreAgent()
             await website_agent.initialize()
-        
+
         # Check if initialization was successful
         if website_agent.agent is None:
             raise RuntimeError("Failed to initialize WebsiteExploreAgent - agent is None")
-        
+
         agent = website_agent.agent
 
         user_proxy = UserProxyAgent(
             name="user",
             input_func=user_input_func,  # Use the user input function.
         )
-        
-        # Log the participants before creating the team
-        logger.debug(f"Creating team with participants: agent={agent}, user_proxy={user_proxy}")
-        logger.debug(f"Agent name: {getattr(agent, 'name', 'NO_NAME')}")
-        logger.debug(f"User proxy name: {getattr(user_proxy, 'name', 'NO_NAME')}")
-        
-        team = MagenticOneGroupChat(
+
+        # Create the ProgressOnly MagenticOneGroupChat directly
+        team = ProgressOnlyMagenticOneGroupChat(
             [agent, user_proxy],
-            model_client=website_agent.model_client
+            model_client=website_agent.model_client,
+            max_turns=20,
+            emit_team_events=False,
         )
-        
+
+        # Expose the active team to the progress callback so we can persist updates
+        progress_manager = team
+
+        logger.debug(f"Created progress-only team with participants: agent={agent}, user_proxy={user_proxy}")
+
         return team
     except Exception as e:
-        logger.error(f"Error creating team: {e}")
+        logger.error(f"Error creating filtered team: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise
 
@@ -314,7 +343,7 @@ async def save_history(history: list[dict[str, Any]]):
     except Exception as e:
         logger.error(f"Error saving history: {e}")
 
-async def save_team_state(team: MagenticOneGroupChat):
+async def save_team_state(team: Any):
     """Save team state to file."""
     try:
         async with aiofiles.open(state_path, "w") as file:
@@ -326,8 +355,9 @@ async def save_team_state(team: MagenticOneGroupChat):
 # Chainlit event handlers
 @cl.on_chat_start
 async def start():
-    """Initialize the AutoGen team when chat starts"""
-    # await cl.Message(content="🚀 Initializing AutoGen MagenticOne Team with Playwright MCP...").send()
+    """Initialize the filtered AutoGen team when chat starts"""
+    
+    # await cl.Message(content="🚀 Initializing AutoGen MagenticOne Team with Prompt-Based Progress Filtering...").send()
     
     try:
         # Initialize the website agent
@@ -340,12 +370,13 @@ async def start():
             return
         
         # Load existing history
-        # history = await get_history()
+        history = await get_history()
         # if history:
         #     await cl.Message(content=f"📜 Loaded {len(history)} previous messages").send()
         
         await cl.Message(
-            content="How can I help yout today "
+            content="How can I help you today !!",
+            author="Testing Agent"
         ).send()
         
     except Exception as e:
@@ -353,7 +384,8 @@ async def start():
 
 @cl.on_message
 async def main(message: cl.Message):
-    """Handle incoming messages and process them through AutoGen team"""
+    """Handle incoming messages and process them through filtered AutoGen team"""
+    global current_progress_msg
     user_message = message.content.strip()
     
     # Queue for user input requests from the agent
@@ -365,189 +397,114 @@ async def main(message: cl.Message):
         nonlocal current_user_input_request
         
         try:
-            logger.info(f"🤔 Agent requesting user input: {prompt}")
-            
             # Send user input request to Chainlit
             current_user_input_request = await cl.AskUserMessage(
                 content=f"🤔 **Agent needs input:**\n\n{prompt}",
                 timeout=300  # 5 minutes timeout
             ).send()
             
-            logger.info(f"📝 User input response type: {type(current_user_input_request)}")
-            logger.info(f"📝 User input response: {current_user_input_request}")
-            
-            # Handle different response types
-            if current_user_input_request is None:
-                return "No response received (None)"
-            
-            # If it's a dictionary, get content from 'output' field (Chainlit's response format)
-            if isinstance(current_user_input_request, dict):
-                # Try 'output' field first (this is where Chainlit puts the actual user input)
-                content = current_user_input_request.get('output', '')
-                if content:
-                    return content
-                
-                # Fallback to 'content' field
-                content = current_user_input_request.get('content', '')
-                if content:
-                    return content
-                
-                # If neither field has content, log the full structure for debugging
-                logger.warning(f"No content found in response fields. Full response: {current_user_input_request}")
-                return "No content in response"
-            
-            # If it has a content attribute
-            if hasattr(current_user_input_request, 'content'):
-                return current_user_input_request.content
-            
-            # Convert to string as fallback
-            return str(current_user_input_request)
+            if current_user_input_request:
+                # Extract the actual user response
+                if isinstance(current_user_input_request, dict):
+                    # Check different possible keys for the response
+                    response = current_user_input_request.get('output') or \
+                              current_user_input_request.get('content') or \
+                              current_user_input_request.get('response') or \
+                              str(current_user_input_request)
+                    
+                    logger.info(f"📝 User input extracted: {response}")
+                    return response
+                else:
+                    return str(current_user_input_request)
+            else:
+                return "No response received"
                 
         except Exception as e:
-            error_msg = f"Error getting user input: {e}"
-            logger.error(error_msg)
-            logger.error(f"Full traceback: {traceback.format_exc()}")
-            return error_msg
+            logger.error(f"Error getting user input: {e}")
+            return f"Error getting user input: {e}"
     
     try:
-        # Show processing message
-        progress_msg = await cl.Message(content="🤖 Processing your request with AutoGen MagenticOne...").send()
-        
-        # Get the team
-        team = await get_team(user_input_func)
-        
+        # Disable user input while the agent is processing
+        try:
+            await cl.context.emitter.task_start()
+        except Exception as e:
+            logger.debug(f"Could not send task_start: {e}")
+
+        # Show initial processing message
+        await cl.Message(content="🤖 AI Thinking...").send()
+
+        # Get the filtered team
+        team = await get_filtered_team(user_input_func)
+
         # Create TextMessage for team processing
         text_message = TextMessage(content=user_message, source="user")
-        
+
         # Get chat history
         history = await get_history()
-        
-        # Buffer for streaming content
-        message_buffer = {}
+
+        # Process message through filtered AutoGen team
         response_messages = []
-        
-        # Process message through AutoGen team
-        stream = team.run_stream(task=text_message)
-        
-        # Update progress message
-        progress_msg.content = "🔄 AutoGen team is working..."
-        await progress_msg.update()
-        
+
+        # Use the orchestrator-only stream (drop participant-origin events)
+        stream = _orchestrator_only_run_stream(team, task=text_message)
+
         async for msg in stream:
+            logger.debug(f"Received orchestrator stream event: type={type(msg).__name__} source={getattr(msg,'source',None)} response_present={hasattr(msg,'response')}")
             try:
                 if isinstance(msg, TaskResult):
+                    # Task completed
+                    await cl.Message(
+                        content="✅ **Task Completed Successfully!**\n\n"
+                        "The agent has finished executing your test scenario."
+                    ).send()
                     continue
-                
-                # Safely serialize message
-                message_data = safe_model_dump(msg)
+
+                if isinstance(msg, UserInputRequestedEvent):
+                    # This should be handled by the user_input_func
+                    logger.info("📤 UserInputRequestedEvent detected in main stream")
+                    continue
+
+                # Only show filtered messages that made it through the orchestrator
+                # Handle GroupChatAgentResponse-like events that wrap a chat_message
+                response_obj = getattr(msg, 'response', None)
+                if response_obj is not None and getattr(response_obj, 'chat_message', None) is not None:
+                    inner_msg = response_obj.chat_message
+                    message_data = safe_model_dump(inner_msg)
+                else:
+                    message_data = safe_model_dump(msg)
+
                 message_type = message_data.get('type', '')
                 source = message_data.get('source', '')
                 content = message_data.get('content', '')
-                
-                # Calculate content length safely
-                content_length = 0
-                if isinstance(content, str):
-                    content_length = len(content)
-                elif isinstance(content, list):
-                    content_length = len(str(content))
-                elif content:
-                    content_length = len(str(content))
-                
-                logger.info(f"📨 Processing: type='{message_type}', source='{source}', content_length={content_length}, content_type={type(content).__name__}")
-                
-                # Handle different message types
-                if isinstance(msg, UserInputRequestedEvent):
-                    # This should be handled by the user_input_func, but we can log it
-                    logger.info("📤 UserInputRequestedEvent detected")
-                    continue
-                    
-                elif message_type == 'ModelClientStreamingChunkEvent' and source and content:
-                    # Buffer streaming chunks (only if content is a string)
-                    if isinstance(content, str):
-                        if source not in message_buffer:
-                            message_buffer[source] = {
-                                'type': 'TextMessage',
-                                'source': source,
-                                'content': '',
-                                'models_usage': message_data.get('models_usage'),
-                                'metadata': message_data.get('metadata', {}),
-                                'created_at': message_data.get('created_at'),
-                                'request_id': message_data.get('request_id')
-                            }
-                        # Append content to buffer
-                        message_buffer[source]['content'] += content
-                        
-                        # Update progress with current agent activity
-                        agent_name = source.replace('_', ' ').title()
-                        progress_msg.content = f"🤖 {agent_name} is working..."
-                        await progress_msg.update()
-                    
-                elif message_type == 'TextMessage' and source and content:
-                    # Complete message from agent
+
+
+                manager_name = getattr(team, '_group_chat_manager_name', None)
+                # Always use 'Testing Agent' as author for manager-origin messages
+                if source == manager_name and isinstance(content, str):
+                    await cl.Message(content=content, author='Testing Agent').send()
+                elif len(str(content).strip()) > 10:
                     agent_name = source.replace('_', ' ').title()
-                    
-                    # Convert content to string if it's not already
-                    content_str = content if isinstance(content, str) else str(content)
-                    
-                    # Send the complete message
-                    await cl.Message(
-                        content=f"**{agent_name}:**\n\n{content_str}",
-                        author=agent_name
-                    ).send()
-                    
-                    response_messages.append(message_data)
-                    history.append(message_data)
-                    
-                else:
-                    # Other message types
-                    # Handle content that might be a list or string
-                    content_str = ""
-                    if isinstance(content, str):
-                        content_str = content.strip()
-                    elif isinstance(content, list):
-                        # Convert list content to string
-                        content_str = str(content).strip()
-                    elif content:
-                        content_str = str(content).strip()
-                    
-                    if content_str:
-                        response_messages.append(message_data)
-                        history.append(message_data)
-                        
+                    await cl.Message(content=f"**{agent_name}:**\n\n{content}", author=agent_name).send()
+
+                response_messages.append(message_data)
+                history.append(message_data)
             except Exception as e:
-                logger.error(f"Error processing message: {e}")
+                logger.error(f"Error processing filtered message: {e}")
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 continue
-        
-        # Send any remaining buffered messages
-        for source, buffered_message in message_buffer.items():
-            buffered_content = buffered_message.get('content', '')
-            # Handle content that might be a list or string
-            if isinstance(buffered_content, str):
-                content_to_check = buffered_content.strip()
-            elif isinstance(buffered_content, list):
-                content_to_check = str(buffered_content).strip()
-            else:
-                content_to_check = str(buffered_content).strip() if buffered_content else ""
-            
-            if content_to_check:
-                agent_name = source.replace('_', ' ').title()
-                
-                await cl.Message(
-                    content=f"**{agent_name}:**\n\n{content_to_check}",
-                    author=agent_name
-                ).send()
-                
-                response_messages.append(buffered_message)
-                history.append(buffered_message)
-        
-        # Update progress to completion
-        progress_msg.content = "✅ AutoGen team completed the task!"
-        await progress_msg.update()
-        
+
+        # Show final progress as a new message
+        await cl.Message(content="✅ **Processing Complete!**\n\nTask execution finished.").send()
+
+        # Re-enable user input when the run finishes
+        try:
+            await cl.context.emitter.task_end()
+        except Exception as e:
+            logger.debug(f"Could not send task_end: {e}")
+
         # Save team state and history
         await save_team_state(team)
-        
+
         # Add user message to history
         user_msg_data = {
             "type": "TextMessage",
@@ -556,13 +513,21 @@ async def main(message: cl.Message):
             "created_at": datetime.now().isoformat()
         }
         history.append(user_msg_data)
-        
+
         await save_history(history)
-        
+
+
+
     except Exception as e:
         logger.error(f"Error in main message handler: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
-        
+
+        # Ensure UI input is re-enabled on error
+        try:
+            await cl.context.emitter.task_end()
+        except Exception:
+            pass
+
         await cl.Message(
             content=f"❌ **Error processing request:**\n\n{str(e)}\n\n"
             "Please try again or check the logs for more details."
@@ -577,17 +542,60 @@ async def on_stop():
         website_agent = None
     logger.info("🛑 AutoGen Chainlit app stopped and resources cleaned up")
 
+async def _orchestrator_only_run_stream(team, task: str):
+    """Wrapper around team.run_stream that only yields events originating from the
+    orchestrator (the group chat manager). This provides a strong guarantee that
+    participant-origin messages never reach the UI.
+
+    The wrapper inspects event types and the `source` fields. It yields:
+    - TextMessage or other chat messages whose `.source` == team's group chat manager name
+    - GroupChatAgentResponse events that contain a chat_message whose source == manager name
+    - UserInputRequestedEvent when issued by the manager
+    """
+    manager_name = getattr(team, "_group_chat_manager_name", None)
+    async for evt in team.run_stream(task=task):
+        try:
+            # GroupChatAgentResponse-like objects have a `.response.chat_message`
+            response = getattr(evt, "response", None)
+            if response is not None and getattr(response, "chat_message", None) is not None:
+                msg = response.chat_message
+                if getattr(msg, "source", None) == manager_name:
+                    yield evt
+                else:
+                    logger.debug(f"Dropping GroupChatAgentResponse from participant: type={type(evt).__name__} source={getattr(msg,'source',None)}")
+                    continue
+
+            # Direct chat messages (TextMessage, StopMessage, etc.)
+            if getattr(evt, "source", None) == manager_name:
+                yield evt
+                continue
+
+            # User input requests from manager
+            if isinstance(evt, UserInputRequestedEvent) and getattr(evt, "source", None) == manager_name:
+                yield evt
+                continue
+
+            # Otherwise drop the event (participant-origin)
+            logger.debug(f"Dropping event from participant: type={type(evt).__name__} source={getattr(evt,'source',None)}")
+            continue
+        except Exception:
+            # Be conservative: on errors skip the event
+            logger.exception("Error while filtering orchestrator stream event")
+            continue
+
 if __name__ == "__main__":
-    print("🚀 Starting AutoGen MagenticOne Team with Chainlit...")
+    print("🚀 Starting AutoGen MagenticOne Team with Prompt-Based Progress Filtering + Chainlit...")
     print("🌐 Chainlit app will be available at: http://localhost:8000")
     print("📋 Features:")
-    print("  - AutoGen MagenticOne orchestration")
+    print("  - Prompt-enhanced Magnetic One orchestrator with AI-generated progress summaries")
+    print("  - Clean, structured progress updates (Just Completed / Currently Doing / Next Step)")
+    print("  - Orchestrator-only message display (sub-agent messages filtered out)")
     print("  - Playwright MCP integration for live browser automation")
     print("  - Interactive chat interface with Chainlit")
-    print("  - Real-time agent progress updates")
-    print("  - Autonomous test execution with evidence capture")
+    print("  - Contextual AI-driven progress updates instead of hardcoded keywords")
+    print("  - Smart orchestration with user-friendly communication")
     print()
     
-    # Run chainlit
+    # Run chainlit from virtual environment
     import subprocess
-    subprocess.run(["chainlit", "run", __file__, "--port", "8000"])
+    subprocess.run(["/Users/krishnachandak/Documents/repos/testing-autogen/env/bin/chainlit", "run", __file__, "--port", "8000"])
