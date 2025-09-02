@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eu
+# Try to enable pipefail in shells that support it (bash/zsh); ignore if unsupported
+(set -o pipefail) 2>/dev/null || true
 CDP_ENDPOINT="${CDP_ENDPOINT:-http://127.0.0.1:9222}"
 PORT="${MCP_PORT:-8931}"
 TRIES=60

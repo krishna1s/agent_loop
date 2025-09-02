@@ -41,16 +41,12 @@ RUN pip install playwright \
 # Set environment for MCP Playwright server to be local SSE
 ENV PLAYWRIGHT_MCP_SSE_URL="http://127.0.0.1:8931/sse"
 
-# Create launch script for Chromium with a CDP (Chrome DevTools Protocol) endpoint
-COPY launch_chromium.sh /app/launch_chromium.sh
-COPY wait_for_cdp_and_start_mcp.sh /app/wait_for_cdp_and_start_mcp.sh
-RUN chmod +x /app/launch_chromium.sh /app/wait_for_cdp_and_start_mcp.sh
-
-# Screenshot loop script (Playwright connects over CDP to existing browser)
-COPY screenshot_loop.py /app/screenshot_loop.py
-
 # Copy app code and configs
 COPY . .
+
+# Normalize line endings for shell scripts and make them executable
+RUN find /app -maxdepth 1 -type f -name "*.sh" -exec sed -i 's/\r$//' {} + \
+    && chmod +x /app/*.sh
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY nginx.conf /etc/nginx/nginx.conf
 
