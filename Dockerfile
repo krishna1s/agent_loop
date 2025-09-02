@@ -34,11 +34,10 @@ COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright and browsers (Chromium + deps) and also Chrome channel
-RUN pip install playwright \
-    && playwright install --with-deps chromium \
-    && playwright install chrome
+RUN pip install playwright && playwright install --with-deps chromium
+RUN npm i -g @playwright/mcp@latest 
 
-# Set environment for MCP Playwright server to be local SSE
+    # Set environment for MCP Playwright server to be local SSE
 ENV PLAYWRIGHT_MCP_SSE_URL="http://127.0.0.1:8931/sse"
 
 # Copy app code and configs
@@ -50,9 +49,6 @@ RUN find /app -maxdepth 1 -type f -name "*.sh" -exec sed -i 's/\r$//' {} + \
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY nginx.conf /etc/nginx/nginx.conf
 
-RUN npm i -g @playwright/mcp@latest \
-    && npx --yes playwright@latest install --with-deps chromium \
-    && npx --yes playwright@latest install chrome
 
 # Expose nginx and remote browser ports
 EXPOSE 80 9222
