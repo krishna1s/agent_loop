@@ -34,13 +34,21 @@ RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 # Install Playwright and browsers
 RUN pip install playwright && playwright install --with-deps chromium
 
+# Create launch script for Chromium with a CDP (Chrome DevTools Protocol) endpoint
+COPY launch_chromium.sh /app/launch_chromium.sh
+COPY wait_for_cdp_and_start_mcp.sh /app/wait_for_cdp_and_start_mcp.sh
+RUN chmod +x /app/launch_chromium.sh /app/wait_for_cdp_and_start_mcp.sh
+
+# Screenshot loop script (Playwright connects over CDP to existing browser)
+COPY screenshot_loop.py /app/screenshot_loop.py
+
 # Copy app code and configs
 COPY . .
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY nginx.conf /etc/nginx/nginx.conf
 
 # Expose only nginx port
-EXPOSE 80
+EXPOSE 80 9222
 
 # Start all services
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
