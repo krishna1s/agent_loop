@@ -147,6 +147,8 @@ Example output (replace with current state):
             "Provide a numbered list of step-by-step actions the agent performed or should perform. For each step include the selector based on page snapshot, which can be used while generating playwright script or tool used when relevant.\n\n"
             "### Expected Results\n\n"
             "For each step above, provide the expected result.\n\n"
+            "### Playwright Script\n\n"
+            "Generate a single executable .spec.ts file using semantic selectors (getByRole > getByLabel > getByTestId). Include only live-validated assertions from actual exploration. Use conservative approach with error handling, wait strategies, and descriptive comments for any assumptions. NO fabricated expect() statements.\n\n"
             "### Recommendations\n\n"
             "Optional: Suggested next steps or mitigations.\n\n"
             "ONLY output the Markdown document. Do NOT include chain-of-thought or extra commentary.\n\n"

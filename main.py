@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Optional
 from pathlib import Path
 from autogen_ext.agents.azure._azure_ai_agent import AzureAIAgent
+from azure.identity.aio import DefaultAzureCredential
 from azure.ai.projects.aio import AIProjectClient
 from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
 from azure.ai.agents.models import (
@@ -136,10 +137,15 @@ class WebsiteExploreAgent:
         self.team = None
         self.workbench = None
         self.runtime = None
-
-        # MCP server configuration
+        
+        # MCP server configuration (runs inside the same container by default)
+        # Override with PLAYWRIGHT_MCP_SSE_URL if you host it elsewhere
+        mcp_sse_url = os.getenv(
+            "PLAYWRIGHT_MCP_SSE_URL",
+            "http://127.0.0.1:8931/sse",
+        )
         self.playwright_server_params = SseServerParams(
-            url="http://localhost:8931/sse",
+            url=mcp_sse_url,
         )
     
     async def initialize(self):
@@ -149,13 +155,15 @@ class WebsiteExploreAgent:
             # Check environment variables
             required_vars = [
                 "AZURE_OPENAI_ENDPOINT",
-                "AZURE_OPENAI_DEPLOYMENT_NAME", 
-                "AZURE_OPENAI_API_VERSION"
+                "AZURE_OPENAI_DEPLOYMENT_NAME",
+                "AZURE_OPENAI_API_VERSION",
             ]
             
             missing_vars = [var for var in required_vars if not os.getenv(var)]
             if missing_vars:
-                raise ValueError(f"Missing environment variables: {missing_vars}")
+                raise ValueError(
+                    f"Missing environment variables: {missing_vars}"
+                )
             
             # Create Azure OpenAI client (for legacy AssistantAgent path)
             endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -196,6 +204,36 @@ class WebsiteExploreAgent:
             # Get tools from MCP workbench (await the coroutine)
             mcp_tools = await self.workbench.list_tools()
             print(f"🔧 Retrieved {len(mcp_tools)} MCP tools")
+            
+            # Create the AssistantAgent with MCP workbench
+            self.agent = AssistantAgent(
+                name="TestPlanGenerator",
+                model_client=self.model_client,
+                system_message=self.get_system_message(),
+                workbench=self.workbench,
+                description=(
+                    "Specialized agent for systematic website exploration and "
+                    "test plan generation using MCP Playwright tools"
+                ),
+                # NOTE:
+                # We disable reflection-on-tool-use and streaming to avoid a
+                # known issue where an assistant message containing tool_calls
+                # is not immediately followed by the corresponding tool result
+                # messages, which triggers a 400 from the API. The workbench
+                # will still enable tool usage; this only disables the extra
+                # reflection pass and streaming mode.
+                reflect_on_tool_use=False,
+                model_client_stream=False
+            )
+            
+            # Example: project client wiring if needed in the future
+            # project_client = AIProjectClient(  # type: ignore
+            #     credential=DefaultAzureCredential(),
+            #     endpoint=(
+            #         "https://foundyuedn.services.ai.azure.com/api/projects/"
+            #         "projectuedn"
+            #     ),
+            # )
 
             # Attempt AzureAIAgent initialization if Azure AI Project env vars present
             # azure_project_endpoint = os.getenv("AZURE_AI_PROJECT_ENDPOINT")
@@ -326,50 +364,70 @@ class WebsiteExploreAgent:
 
     def get_system_message(self) -> str:
         """Create the comprehensive system message for the agent"""
-        return '''You are an autonomous Test Exploration Agent that generates detailed test cases from high-level user instructions using MCP Playwright tools.
+        return (
+            'You are an autonomous Test Exploration Agent that generates '
+            'detailed test cases from high-level user instructions using MCP '
+            'Playwright tools.\n\n'
 
-Be concise in progress updates that are emitted to the UI. Your internal reasoning can be thorough, but only concise progress summaries should be shown to the user. Do NOT emit chain-of-thought or detailed sub-agent logs to the UI.
+            'Be concise in progress updates that are emitted to the UI. Your '
+            'internal reasoning can be thorough, but only concise progress '
+            'summaries should be shown to the user. Do NOT emit '
+            'chain-of-thought or detailed sub-agent logs to the UI.\n\n'
 
-Your goals:
-1. Take simple user test steps and autonomously explore the target website using available MCP tools. 
-2. Keep working in a loop until you can produce a fully enhanced, detailed test plan with Preconditions, Test Steps (step-by-step actions), and Expected Results.
-3. After every meaningful action or decision (navigation, click, type, wait, error, or discovery), provide a brief progress update such as:
-   - "Navigated to login page."
-   - "Clicked 'Sign In' button."
-   - "Waiting for dashboard to load."
-   - "Could not find element, taking snapshot and retrying."
-4. Capture screenshots sparingly: take screenshots only when necessary for debugging, evidence, or when you need to inspect HTML attributes. Do NOT take screenshots after every minor action.
-5. Use `mcp_playwright_browser_snapshot` only when you need to inspect element attributes or when a selector fails to locate an element. Use snapshots selectively to aid element discovery.
-6. If clarification or missing test data is required, ask the user for input and then continue once the user responds.
-7. Return the final documentation in Markdown format and include Preconditions, Test Steps, and Expected Results.
+            'Your goals:\n'
+            '1. Take simple user test steps and autonomously explore the '
+            'target website using available MCP tools.\n'
+            '2. Keep working in a loop until you can produce a fully '
+            'enhanced, detailed test plan with Preconditions, Test Steps '
+            '(step-by-step actions), and Expected Results.\n'
+            '3. After every meaningful action or decision (navigation, '
+            'click, type, wait, error, or discovery), provide a brief '
+            'progress update such as:\n'
+            '   - "Navigated to login page."\n'
+            '   - "Clicked \'Sign In\' button."\n'
+            '   - "Waiting for dashboard to load."\n'
+            '   - "Could not find element, taking snapshot and retrying."\n'
+            '4. Capture screenshots sparingly: take screenshots only when '
+            'necessary for debugging, evidence, or when you need to inspect '
+            'HTML attributes. Do NOT take screenshots after every minor '
+            'action.\n'
+            '5. Use `mcp_playwright_browser_snapshot` only when you need to '
+            'inspect element attributes or when a selector fails to locate an '
+            'element. Use snapshots selectively to aid element discovery.\n'
+            '6. If clarification or missing test data is required, ask the '
+            'user for input and then continue once the user responds.\n'
+            '7. Return the final documentation in Markdown format and include '
+            'Preconditions, Test Steps, and Expected Results.\n\n'
 
-### 🔹 Available MCP Tools
-
-Use the following MCP tools for browser exploration:
-- mcp_playwright_browser_navigate: Navigate to URLs
-- mcp_playwright_browser_snapshot: Capture page snapshots for element discovery
-- mcp_playwright_browser_click: Click on elements
-- mcp_playwright_browser_type: Type text into input fields
-- mcp_playwright_browser_take_screenshot: Take screenshots
-- mcp_playwright_browser_hover: Hover over elements
-- mcp_playwright_browser_select_option: Select dropdown options
-- mcp_playwright_browser_press_key: Press keyboard keys
-- mcp_playwright_browser_evaluate: Execute JavaScript
-- mcp_playwright_browser_wait_for: Wait for conditions
-- mcp_playwright_browser_resize: Resize browser window
-- mcp_playwright_browser_navigate_back/forward: Navigate browser history
-- mcp_playwright_browser_tab_*: Tab management tools
-
-### 🔹 Execution Strategy
-
-- Start with mcp_playwright_browser_navigate to open the portal.
-- At each step:
-  - Perform the action using appropriate MCP tools.
-  - If element not found → use mcp_playwright_browser_snapshot, retry with updated selector, and report progress.
-  - If blocked → ask user for futher input
-
-
-IMPORTANT: Keep your progress updates concise and focused on actions taken. The orchestrator will handle the formatting for the UI.'''
+            '### 🔹 Available MCP Tools\n\n'
+            'Use the following MCP tools for browser exploration:\n'
+            '- mcp_playwright_browser_navigate: Navigate to URLs\n'
+            '- mcp_playwright_browser_snapshot: Capture page snapshots for '
+            'element discovery\n'
+            '- mcp_playwright_browser_click: Click on elements\n'
+            '- mcp_playwright_browser_type: Type text into input fields\n'
+            '- mcp_playwright_browser_take_screenshot: Take screenshots\n'
+            '- mcp_playwright_browser_hover: Hover over elements\n'
+            '- mcp_playwright_browser_select_option: Select dropdown options\n'
+            '- mcp_playwright_browser_press_key: Press keyboard keys\n'
+            '- mcp_playwright_browser_evaluate: Execute JavaScript\n'
+            '- mcp_playwright_browser_wait_for: Wait for conditions\n'
+            '- mcp_playwright_browser_resize: Resize browser window\n'
+            '- mcp_playwright_browser_navigate_back/forward: Navigate '
+            'browser history\n'
+            '- mcp_playwright_browser_tab_*: Tab management tools\n\n'
+            '### 🔹 Execution Strategy\n\n'
+            '- Start with mcp_playwright_browser_navigate to open the '
+            'portal.\n'
+            '- At each step:\n'
+            '  - Perform the action using appropriate MCP tools.\n'
+            '  - If element not found → use mcp_playwright_browser_snapshot, '
+            'retry with updated selector, and report progress.\n'
+            '  - If blocked → ask user for futher input\n\n'
+            'IMPORTANT: Keep your progress updates concise and focused on '
+            'actions taken. The orchestrator will handle the formatting for '
+            'the UI.'
+        )
 
 # Global variables for team management
 website_agent = None
@@ -380,8 +438,12 @@ history_path = "team_history.json"
 
 # No progress checklist or aggregation: show orchestrator output directly
 
-async def get_filtered_team(user_input_func: Callable[[str, Optional[CancellationToken]], Awaitable[str]]) -> Any:
-    """Create and return a ProgressOnly MagenticOne team with user input function"""
+async def get_filtered_team(
+    user_input_func: Callable[
+        [str, Optional[CancellationToken]], Awaitable[str]
+    ]
+) -> Any:
+    """Create and return a ProgressOnly MagenticOne team with a user input function."""
     global website_agent, progress_manager
     try:
         # Initialize the WebsiteExploreAgent if not already done
@@ -391,7 +453,9 @@ async def get_filtered_team(user_input_func: Callable[[str, Optional[Cancellatio
 
         # Check if initialization was successful
         if website_agent.agent is None:
-            raise RuntimeError("Failed to initialize WebsiteExploreAgent - agent is None")
+            raise RuntimeError(
+                "Failed to initialize WebsiteExploreAgent - agent is None"
+            )
 
         agent = website_agent.agent
 
@@ -408,10 +472,14 @@ async def get_filtered_team(user_input_func: Callable[[str, Optional[Cancellatio
             emit_team_events=False,
         )
 
-        # Expose the active team to the progress callback so we can persist updates
+    # Expose the active team to the progress callback for possible persistence
         progress_manager = team
 
-        logger.debug(f"Created progress-only team with participants: agent={agent}, user_proxy={user_proxy}")
+        logger.debug(
+            "Created progress-only team with participants: agent=%s, user_proxy=%s",
+            agent,
+            user_proxy,
+        )
 
         return team
     except Exception as e:
@@ -680,7 +748,7 @@ async def _orchestrator_only_run_stream(team, task: str):
 
 
 # --- FastAPI API for programmatic access ---
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel as PydanticBaseModel
@@ -692,19 +760,99 @@ if "chainlit" not in sys.argv[0]:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
+    # Explicit catch-all OPTIONS handler for preflight across all API paths
+    @app.options("/{rest_of_path:path}")
+    async def preflight_handler(request: Request, rest_of_path: str) -> Response:
+        requested_headers = request.headers.get("Access-Control-Request-Headers", "")
+        allow_headers = requested_headers or (
+            "Authorization, Content-Type, X-Requested-With, Accept, Origin, User-Agent, DNT, Cache-Control, X-Mx-ReqToken"
+        )
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": allow_headers,
+            "Access-Control-Max-Age": "86400",
+        }
+        return Response(status_code=204, headers=headers)
+
     class TaskRequest(PydanticBaseModel):
         message: str
 
+    class InitRequest(PydanticBaseModel):
+        endpoint: str
+        deployment_name: str
+        api_version: Optional[str] = None
+        api_key: Optional[str] = None
 
-    # In-memory task store: {task_id: {"status": str, "progress": [messages], "created_at": datetime, ...}}
+    @app.post("/init")
+    async def initialize_config(req: InitRequest):
+        """Initialize/update Azure OpenAI configuration for subsequent tasks.
+
+        Sets process environment variables so future agent initializations use
+        them:
+        - AZURE_OPENAI_ENDPOINT
+        - AZURE_OPENAI_DEPLOYMENT_NAME
+        - AZURE_OPENAI_API_VERSION
+        """
+        # Basic validation
+        endpoint = (req.endpoint or "").strip()
+        deployment = (req.deployment_name or "").strip()
+        api_version = (req.api_version or "2024-06-01").strip()
+        api_key = (req.api_key or "").strip()
+        if not endpoint or not deployment:
+            raise HTTPException(
+                status_code=400,
+                detail="'endpoint' and 'deployment_name' are required",
+            )
+
+        # Set environment variables for subsequent use in this process
+        os.environ["AZURE_OPENAI_ENDPOINT"] = endpoint
+        os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"] = deployment
+        os.environ["AZURE_OPENAI_API_VERSION"] = api_version
+        if api_key:
+            os.environ["AZURE_OPENAI_API_KEY"] = api_key
+
+        # Reset any existing agent so the next task uses the new config
+        global website_agent
+        if website_agent is not None:
+            try:
+                await website_agent.cleanup()
+            except Exception:
+                # Non-fatal; ensure we drop the old instance
+                logger.exception(
+                    "Error cleaning up existing WebsiteExploreAgent during /init"
+                )
+            website_agent = None
+
+        return {
+            "status": "ok",
+            "endpoint": endpoint,
+            "deployment_name": deployment,
+            "api_version": api_version,
+            "api_key_set": bool(api_key),
+        }
+
+
+    # In-memory task store: {task_id: {"status": str, "progress": [messages],
+    # "created_at": datetime, ...}}
     import uuid
-    from typing import Dict
-    task_store: Dict[str, dict] = {}
+    from typing import Dict, List
+    from typing_extensions import TypedDict
+
+    class TaskEntry(TypedDict, total=False):
+        status: str
+        progress: List[dict]
+        created_at: str
+        error: Optional[str]
+        input_prompt: Optional[str]
+        input_response: Optional[str]
+        _resume_event: asyncio.Event
+
+    task_store: Dict[str, TaskEntry] = {}
 
 
     class TaskStatus(str):
@@ -729,7 +877,9 @@ if "chainlit" not in sys.argv[0]:
             "_resume_event": asyncio.Event(),
         }
 
-        async def user_input_func(prompt: str, cancellation_token: CancellationToken | None) -> str:
+        async def user_input_func(
+            prompt: str, cancellation_token: CancellationToken | None
+        ) -> str:
             # Set status to waiting, store prompt, and wait for resume
             task_store[task_id]["status"] = TaskStatus.WAITING_FOR_INPUT
             task_store[task_id]["input_prompt"] = prompt
@@ -746,14 +896,17 @@ if "chainlit" not in sys.argv[0]:
                 stream = _orchestrator_only_run_stream(team, task=text_message)
                 async for msg in stream:
                     response_obj = getattr(msg, 'response', None)
-                    if response_obj is not None and getattr(response_obj, 'chat_message', None) is not None:
+                    if response_obj is not None and getattr(
+                        response_obj, 'chat_message', None
+                    ) is not None:
                         inner_msg = response_obj.chat_message
                         message_data = safe_model_dump(inner_msg)
                     else:
                         message_data = safe_model_dump(msg)
-                    # If this is a UserInputRequestedEvent, status will be set by user_input_func
+                    # If this is a UserInputRequestedEvent, status will be set
+                    # by user_input_func
                     if isinstance(msg, UserInputRequestedEvent):
-                        # Progress and prompt already handled in user_input_func
+                        # Progress and prompt handled in user_input_func
                         pass
                     else:
                         task_store[task_id]["progress"].append(message_data)
@@ -775,12 +928,18 @@ if "chainlit" not in sys.argv[0]:
 
     @app.post("/task/{task_id}/input")
     async def provide_input(task_id: str, req: InputRequest):
-        """Provide input to a waiting task and resume it. Also log the input in progress."""
+        """Provide input to a waiting task and resume it.
+
+        Also logs the user input in progress timeline.
+        """
         task = task_store.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         if task["status"] != TaskStatus.WAITING_FOR_INPUT:
-            raise HTTPException(status_code=400, detail="Task is not waiting for input")
+            raise HTTPException(
+                status_code=400,
+                detail="Task is not waiting for input",
+            )
         task["input_response"] = req.input
         # Log the user input as a progress event
         task["progress"].append({
