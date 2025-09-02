@@ -58,8 +58,8 @@ RUN npm i -g @playwright/mcp@latest \
     && npx --yes playwright@latest install --with-deps chromium \
     && npx --yes playwright@latest install chrome
 
-# Expose nginx and MCP ports
-EXPOSE 80 4000
+# Expose nginx and remote browser ports
+EXPOSE 80 9222
 
 # Start all services
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
