@@ -125,7 +125,7 @@ class WebsiteExploreAgent:
         
         # MCP server configuration
         self.playwright_server_params = SseServerParams(
-            url="http://localhost:8931/sse",
+            url="http://playwrightmcp.eastus.azurecontainer.io:4000/sse",
         )
     
     async def initialize(self):
@@ -190,8 +190,15 @@ class WebsiteExploreAgent:
                 system_message=self.get_system_message(),
                 workbench=self.workbench,
                 description="Specialized agent for systematic website exploration and test plan generation using MCP Playwright tools",
-                reflect_on_tool_use=True,
-                model_client_stream=True
+                # NOTE:
+                # We disable reflection-on-tool-use and streaming to avoid a
+                # known issue where an assistant message containing tool_calls
+                # is not immediately followed by the corresponding tool result
+                # messages, which triggers a 400 from the API. The workbench
+                # will still enable tool usage; this only disables the extra
+                # reflection pass and streaming mode.
+                reflect_on_tool_use=False,
+                model_client_stream=False
             )
             
             project_client = AIProjectClient(  # type: ignore
@@ -585,7 +592,7 @@ async def _orchestrator_only_run_stream(team, task: str):
 
 
 # --- FastAPI API for programmatic access ---
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel as PydanticBaseModel
 
@@ -596,10 +603,24 @@ if "chainlit" not in sys.argv[0]:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Explicit catch-all OPTIONS handler for preflight across all API paths
+    @app.options("/{rest_of_path:path}")
+    async def preflight_handler(request: Request, rest_of_path: str) -> Response:
+        requested_headers = request.headers.get("Access-Control-Request-Headers", "")
+        allow_headers = requested_headers or (
+            "Authorization, Content-Type, X-Requested-With, Accept, Origin, User-Agent, DNT, Cache-Control, X-Mx-ReqToken"
+        )
+        headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": allow_headers,
+            "Access-Control-Max-Age": "86400",
+        }
+        return Response(status_code=204, headers=headers)
 
     class TaskRequest(PydanticBaseModel):
         message: str
