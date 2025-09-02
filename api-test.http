@@ -1,3 +1,4 @@
+
 ### Sample .http file for testing FastAPI endpoints
 
 # 1. Create a new task
@@ -20,3 +21,19 @@ Content-Type: application/json
 {
   "input": "Use my credentials to check the login flow pwtest@puneet0288hotmail.onmicrosoft.com and password XXX"
 }
+
+
+
+### Screenshot API tests
+
+# 4. Get latest screenshot (PNG)
+GET http://localhost:8080/api/screenshot
+
+# 5. Get latest screenshot (base64 JSON)
+GET http://localhost:8080/api/screenshot?format=base64
+
+# 6. List all screenshots (metadata)
+GET http://localhost:8080/api/screenshots?limit=25
+
+# 7. List all screenshots (with base64)
+GET http://localhost:8080/api/screenshots?limit=5&include=base64
