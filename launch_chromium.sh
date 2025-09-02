@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eu
+# Try to enable pipefail where supported
+(set -o pipefail) 2>/dev/null || true
 # Launch a persistent Chromium instance with remote debugging (CDP) enabled on 0.0.0.0:9222
 # Use the Playwright-installed Chromium binary
 CHROMIUM_BIN="$(python -c 'import playwright.__main__, json, sys; from pathlib import Path; from playwright._impl._driver import compute_driver_executable;print(compute_driver_executable())' 2>/dev/null || true)"

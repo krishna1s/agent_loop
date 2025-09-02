@@ -27,9 +27,7 @@ from azure.ai.agents.models import (
     MCPToolResource
 )
 
-import config
-from client import ServerConnection
-import time
+import time  # noqa: F401
 
 # Chainlit imports
 import chainlit as cl
@@ -37,12 +35,12 @@ import chainlit as cl
 # AutoGen imports
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_agentchat.base import TaskResult
-from autogen_agentchat.messages import TextMessage, UserInputRequestedEvent, ModelClientStreamingChunkEvent
+from autogen_agentchat.messages import TextMessage, UserInputRequestedEvent
 from autogen_core import CancellationToken
 from autogen_ext.models.openai import AzureOpenAIChatCompletionClient
 from autogen_ext.auth.azure import AzureTokenProvider
 from autogen_ext.tools.mcp import McpWorkbench, SseServerParams
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential  # noqa: F401
 
 # Import our custom orchestrator
 from TestingAgent import CustomMagneticOneGroupChat
@@ -51,9 +49,9 @@ from TestingAgent import CustomMagneticOneGroupChat
 from dotenv import load_dotenv
 load_dotenv()
 
-import aiofiles
-import yaml
-from pydantic import BaseModel
+import aiofiles  # noqa: F401
+import yaml  # noqa: F401
+from pydantic import BaseModel  # noqa: F401
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -170,12 +168,14 @@ class WebsiteExploreAgent:
             deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
             api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-06-01")
             api_key = os.getenv("AZURE_OPENAI_API_KEY")
+            # Important: model must be a valid OpenAI model name, not the Azure deployment name
+            model_name = os.getenv("AZURE_OPENAI_MODEL", "gpt-4o")
             
             if api_key:
                 # API Key authentication
                 self.model_client = AzureOpenAIChatCompletionClient(
                     azure_deployment=deployment,
-                    model=deployment or 'gpt-4o',
+                    model=model_name,
                     api_version=api_version,
                     azure_endpoint=endpoint,
                     api_key=api_key
@@ -189,7 +189,7 @@ class WebsiteExploreAgent:
                 
                 self.model_client = AzureOpenAIChatCompletionClient(
                     azure_deployment=deployment,
-                    model=deployment or 'gpt-4o',
+                    model=model_name,
                     api_version=api_version,
                     azure_endpoint=endpoint,
                     azure_ad_token_provider=token_provider
@@ -785,6 +785,7 @@ if "chainlit" not in sys.argv[0]:
     class InitRequest(PydanticBaseModel):
         endpoint: str
         deployment_name: str
+        model: Optional[str] = None  # Valid OpenAI model name (e.g., gpt-4o)
         api_version: Optional[str] = None
         api_key: Optional[str] = None
 
@@ -797,11 +798,13 @@ if "chainlit" not in sys.argv[0]:
         - AZURE_OPENAI_ENDPOINT
         - AZURE_OPENAI_DEPLOYMENT_NAME
         - AZURE_OPENAI_API_VERSION
+        - AZURE_OPENAI_MODEL
         """
         # Basic validation
         endpoint = (req.endpoint or "").strip()
         deployment = (req.deployment_name or "").strip()
         api_version = (req.api_version or "2024-06-01").strip()
+        model = (req.model or os.getenv("AZURE_OPENAI_MODEL") or "gpt-4o").strip()
         api_key = (req.api_key or "").strip()
         if not endpoint or not deployment:
             raise HTTPException(
@@ -815,6 +818,7 @@ if "chainlit" not in sys.argv[0]:
         os.environ["AZURE_OPENAI_API_VERSION"] = api_version
         if api_key:
             os.environ["AZURE_OPENAI_API_KEY"] = api_key
+        os.environ["AZURE_OPENAI_MODEL"] = model
 
         # Reset any existing agent so the next task uses the new config
         global website_agent
@@ -833,6 +837,7 @@ if "chainlit" not in sys.argv[0]:
             "endpoint": endpoint,
             "deployment_name": deployment,
             "api_version": api_version,
+            "model": model,
             "api_key_set": bool(api_key),
         }
 
