@@ -3,7 +3,7 @@ FROM ubuntu:22.04
 # Set non-interactive mode for apt
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
+# Install system dependencies (no nodejs/npm here)
 RUN apt-get update && apt-get install -y \
     python3.11 python3.11-venv python3.11-distutils python3-pip \
     curl git build-essential \
@@ -39,7 +39,15 @@ RUN pip install playwright \
     && playwright install chrome
 
 # Set environment for MCP Playwright server to be local SSE
-ENV PLAYWRIGHT_MCP_SSE_URL="http://127.0.0.1:4000/sse"
+ENV PLAYWRIGHT_MCP_SSE_URL="http://127.0.0.1:8931/sse"
+
+# Create launch script for Chromium with a CDP (Chrome DevTools Protocol) endpoint
+COPY launch_chromium.sh /app/launch_chromium.sh
+COPY wait_for_cdp_and_start_mcp.sh /app/wait_for_cdp_and_start_mcp.sh
+RUN chmod +x /app/launch_chromium.sh /app/wait_for_cdp_and_start_mcp.sh
+
+# Screenshot loop script (Playwright connects over CDP to existing browser)
+COPY screenshot_loop.py /app/screenshot_loop.py
 
 # Copy app code and configs
 COPY . .

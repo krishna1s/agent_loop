@@ -1,0 +1,66 @@
+# Ignore local virtual environments
+env/
+venv/
+*.venv/
+
+# Python cache & artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.*
+htmlcov/
+
+# Node / frontend (if any ends up here)
+node_modules/
+*.tsbuildinfo
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+
+# OS / misc
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Logs & temp
+*.log
+logs/
+/tmp/
+
+# Build / dist outputs
+dist/
+build/
+*.egg
+
+# Local data & artifacts not needed in image
+data/
+models/
+*.sqlite
+*.db
+
+# Screenshots/history generated at runtime (mount as volume if needed)
+screenshots/
+
+# Environment / secrets (provide via --env-file or secrets)
+.env
+.env.*
+
+# Optional backup & cache
+*.bak
+*.orig
+.cache/
+
+# Dockerfile variants (keep main Dockerfile only)
+Dockerfile.playwright
+
+backup

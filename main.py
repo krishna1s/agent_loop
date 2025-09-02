@@ -8,6 +8,7 @@ ProgressOnlyMagenticOneGroupChat so the UI receives concise, structured
 """
 
 import json
+import base64
 import logging
 import os
 import asyncio
@@ -17,7 +18,17 @@ from typing import Any, Awaitable, Callable, Optional
 from pathlib import Path
 from autogen_ext.agents.azure._azure_ai_agent import AzureAIAgent
 from azure.identity.aio import DefaultAzureCredential
+from azure.ai.projects.aio import AIProjectClient
+from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
+from azure.ai.agents.models import (
+    McpTool,
+    FunctionTool,
+    ToolSet,
+    MCPToolResource
+)
 
+import config
+from client import ServerConnection
 import time
 
 # Chainlit imports
@@ -52,6 +63,10 @@ for logger_name in logging.root.manager.loggerDict:
     logging.getLogger(logger_name).setLevel(logging.INFO)
 
 logger = logging.getLogger("AutoGenChainlitFiltered")
+
+# Get MCP server configuration from environment variables
+mcp_server_url = "https://playwrightmcp.eastus.azurecontainer.io"
+mcp_server_label = os.environ.get("MCP_SERVER_LABEL", "mcp_playwright")
 
 class DateTimeJSONEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles datetime objects."""
@@ -117,7 +132,8 @@ class WebsiteExploreAgent:
     
     def __init__(self):
         self.model_client = None
-        self.agent = None
+        self.agent = None            # Active agent (AzureAIAgent if available, else AssistantAgent)
+        self.azure_agent = None      # Specific handle if AzureAIAgent initialized
         self.team = None
         self.workbench = None
         self.runtime = None
@@ -126,7 +142,7 @@ class WebsiteExploreAgent:
         # Override with PLAYWRIGHT_MCP_SSE_URL if you host it elsewhere
         mcp_sse_url = os.getenv(
             "PLAYWRIGHT_MCP_SSE_URL",
-            "http://127.0.0.1:4000/sse",
+            "http://127.0.0.1:8931/sse",
         )
         self.playwright_server_params = SseServerParams(
             url=mcp_sse_url,
@@ -149,7 +165,7 @@ class WebsiteExploreAgent:
                     f"Missing environment variables: {missing_vars}"
                 )
             
-            # Create Azure OpenAI client
+            # Create Azure OpenAI client (for legacy AssistantAgent path)
             endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
             deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
             api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-06-01")
@@ -159,7 +175,7 @@ class WebsiteExploreAgent:
                 # API Key authentication
                 self.model_client = AzureOpenAIChatCompletionClient(
                     azure_deployment=deployment,
-                    model='gpt-4o',
+                    model=deployment or 'gpt-4o',
                     api_version=api_version,
                     azure_endpoint=endpoint,
                     api_key=api_key
@@ -173,7 +189,7 @@ class WebsiteExploreAgent:
                 
                 self.model_client = AzureOpenAIChatCompletionClient(
                     azure_deployment=deployment,
-                    model='gpt-4o',
+                    model=deployment or 'gpt-4o',
                     api_version=api_version,
                     azure_endpoint=endpoint,
                     azure_ad_token_provider=token_provider
@@ -183,7 +199,7 @@ class WebsiteExploreAgent:
             self.workbench = McpWorkbench(self.playwright_server_params)
             await self.workbench.start()
             
-            print("✅ MCP Playwright server connected")
+            # print("✅ MCP Playwright server connected")
             
             # Get tools from MCP workbench (await the coroutine)
             mcp_tools = await self.workbench.list_tools()
@@ -219,16 +235,112 @@ class WebsiteExploreAgent:
             #     ),
             # )
 
-            # self.azure_Agent  = AzureAIAgent(
-            #     name="bing_agent",
-            #     description="An AI assistant with Bing grounding",
-            #     project_client=project_client,
-            #     deployment_name="gpt-4o",
-            #     instructions="You are a helpful assistant.",
-            #     workbench=self.workbench,
-            #     metadata={"source": "AzureAIAgent"},
-            # )
-            print("✅ AutoGen agent initialized with MCP Playwright tools")
+            # Attempt AzureAIAgent initialization if Azure AI Project env vars present
+            # azure_project_endpoint = os.getenv("AZURE_AI_PROJECT_ENDPOINT")
+
+            # if azure_project_endpoint:
+            #     try:
+
+            #         mcp_server_url = config.mcp_server_url
+            #         # agent_name = config.az_assistant_name
+            #         # agent_id = config.az_assistant_id
+            #         # bing_connection_name = config.bing_connection_name
+
+            #         # Fetch tool schemas
+            #         async def fetch_tools():
+            #             conn = ServerConnection(mcp_server_url)
+            #             await conn.connect()
+            #             tools = await conn.list_tools()
+            #             await conn.cleanup()
+            #             return tools
+
+            #         tools = asyncio.run(fetch_tools())
+
+            #         # Build a function for each tool
+            #         def make_tool_func(tool_name):
+            #             def tool_func(**kwargs):
+            #                 async def call_tool():
+            #                     conn = ServerConnection(mcp_server_url)
+            #                     await conn.connect()
+            #                     result = await conn.execute_tool(tool_name, kwargs)
+            #                     await conn.cleanup()
+            #                     return result
+
+            #                 return asyncio.run(call_tool())
+
+            #             tool_func.__name__ = tool_name
+            #             return tool_func
+
+            #         functions_dict = {tool["name"]: make_tool_func(tool["name"]) for tool in tools}
+
+            #         mcp_function_tool = FunctionTool(functions=list(functions_dict.values()))
+
+            #         toolset = ToolSet()
+            #         toolset.add(mcp_function_tool)
+
+            #         # # Initialize agent MCP tool
+            #         mcp_tool = McpTool(
+            #             server_label=mcp_server_label,
+            #             server_url=mcp_server_url,
+            #             allowed_tools=["*"],  # Optional: specify allowed tools,
+            #         )
+            #         mcp_tool.set_approval_mode("never")
+            #         print(mcp_tool.definitions)
+
+            #         project_client = AIProjectClient(
+            #             credential=DefaultAzureCredential(),
+            #             endpoint=azure_project_endpoint,
+            #         )
+
+            #         # agents_client = project_client.agents
+            #         # agents_client.enable_auto_function_calls(toolset)
+
+            #         try:
+            #             # Preferred: pass tools if supported
+            #             self.azure_agent = AzureAIAgent(
+            #                 name="TestPlanGenerator",
+            #                 description="Azure Foundry powered website exploration & test plan agent with MCP tools",
+            #                 project_client=project_client,
+            #                 deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o"),
+            #                 instructions=self.get_system_message(),
+            #                 tool_resources=mcp_tool.resources,
+            #                 # tools=toolset.definitions,
+            #                 metadata={"source": "AzureAIAgent"},
+            #             )
+
+                        
+            #         except TypeError as te:
+            #             print(f"⚠️ AzureAIAgent tools param unsupported ({te}); retrying without tools")
+            #             self.azure_agent = AzureAIAgent(
+            #                 name="TestPlanGenerator",
+            #                 description="Azure Foundry powered website exploration agent",
+            #                 project_client=project_client,
+            #                 deployment_name=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o"),
+            #                 instructions=self.get_system_message(),
+            #                 metadata={"source": "AzureAIAgent"},
+            #             )
+            #         print("✅ AzureAIAgent initialized")
+            #     except Exception as ae:
+            #         print(f"⚠️ Failed to init AzureAIAgent: {ae}; will fallback to AssistantAgent")
+            #         self.azure_agent = None
+            # else:
+            #     print("ℹ️ Azure AI project env vars not set; using AssistantAgent fallback")
+            # Fallback / legacy AssistantAgent (still uses workbench directly)
+            if not self.azure_agent:
+                self.agent = AssistantAgent(
+                    name="TestPlanGenerator",
+                    model_client=self.model_client,
+                    system_message=self.get_system_message(),
+                    workbench=self.workbench,
+                    description="Specialized agent for systematic website exploration and test plan generation using MCP Playwright tools",
+                    reflect_on_tool_use=True,
+                    model_client_stream=True
+                )
+                print("✅ AssistantAgent (fallback) initialized with MCP Playwright tools")
+            else:
+                # Provide unified attribute for downstream code
+                self.agent = self.azure_agent
+                print("✅ Using AzureAIAgent as primary agent")
             
             return True
             
@@ -637,6 +749,7 @@ async def _orchestrator_only_run_stream(team, task: str):
 
 # --- FastAPI API for programmatic access ---
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel as PydanticBaseModel
 
@@ -854,6 +967,74 @@ if "chainlit" not in sys.argv[0]:
             "error": task.get("error"),
             "input_prompt": task.get("input_prompt"),
         }
+
+    # --- HTTP: fetch latest screenshot ---
+    @app.get("/screenshot")
+    async def get_screenshot(format: str = "binary"):
+        """Return the latest screenshot.
+        Query param 'format':
+          - binary (default): returns image/png
+          - base64: returns JSON { ts, image_b64 }
+        """
+        file_path = os.getenv("SCREENSHOT_FILE", "/app/screenshots/latest.png")
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="Screenshot not found")
+        stat = os.stat(file_path)
+        if format.lower() == "base64":
+            try:
+                with open(file_path, "rb") as f:
+                    data = f.read()
+                b64 = base64.b64encode(data).decode("ascii")
+                return JSONResponse({
+                    "ts": int(stat.st_mtime * 1000),
+                    "image_b64": "data:image/png;base64," + b64
+                })
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to read screenshot: {e}")
+        return FileResponse(file_path, media_type="image/png")
+
+    @app.get("/screenshots")
+    async def list_screenshots(limit: int = 50, include: str = "meta"):
+        """List historical screenshots captured by the loop.
+        Query params:
+          - limit: max number of recent entries (default 50)
+          - include:
+              meta (default): return filenames + timestamps
+              base64: include base64 content (be cautious: large)
+        """
+        directory = os.getenv("SCREENSHOT_DIR", "/app/screenshots")
+        if not os.path.isdir(directory):
+            return {"screenshots": []}
+        files = [f for f in os.listdir(directory) if f.startswith("shot_") and f.endswith('.png')]
+        # Sort by timestamp embedded in filename
+        def ts_from_name(name: str) -> int:
+            try:
+                return int(name.split('_')[1].split('.')[0])
+            except Exception:
+                return 0
+        files.sort(key=ts_from_name, reverse=True)
+        selected = files[:limit]
+        results = []
+        for fname in selected:
+            path = os.path.join(directory, fname)
+            try:
+                stat = os.stat(path)
+                entry = {
+                    "file": fname,
+                    "ts": ts_from_name(fname),
+                    "size": stat.st_size,
+                }
+                if include == "base64":
+                    try:
+                        with open(path, 'rb') as f:
+                            b64 = base64.b64encode(f.read()).decode('ascii')
+                        entry["image_b64"] = "data:image/png;base64," + b64
+                    except Exception as e:
+                        entry["error"] = f"read_failed: {e}"
+                results.append(entry)
+            except FileNotFoundError:
+                continue
+        return {"count": len(results), "screenshots": results}
 
     if __name__ == "__main__":
         import uvicorn
