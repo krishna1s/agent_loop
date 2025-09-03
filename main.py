@@ -8,6 +8,8 @@ ProgressOnlyMagenticOneGroupChat so the UI receives concise, structured
 """
 
 import json
+import io
+import contextlib
 import base64
 import logging
 import os
@@ -40,6 +42,7 @@ from autogen_core import CancellationToken
 from autogen_ext.models.openai import AzureOpenAIChatCompletionClient
 from autogen_ext.auth.azure import AzureTokenProvider
 from autogen_ext.tools.mcp import McpWorkbench, SseServerParams
+from playwright.async_api import async_playwright  # for CDP execution API
 from azure.identity import DefaultAzureCredential  # noqa: F401
 
 # Import our custom orchestrator
@@ -840,6 +843,110 @@ if "chainlit" not in sys.argv[0]:
             "model": model,
             "api_key_set": bool(api_key),
         }
+
+    # --- Execute Playwright script against existing CDP browser ---
+    class ExecuteScriptRequest(PydanticBaseModel):
+        script: str  # Python Playwright code. Either define `async def run(page, context, browser, playwright, **kwargs)` or provide a script body.
+        timeout_ms: Optional[int] = 60000
+        navigate_url: Optional[str] = None  # Optional initial navigation
+
+    @app.post("/execute")
+    async def execute_playwright_script(req: ExecuteScriptRequest):
+        """
+        Execute a provided Python Playwright script against an existing browser over CDP.
+
+        Contract:
+    - Inputs: script (str), optional timeout_ms, navigate_url
+        - The script can either:
+            1) Define `async def run(page, context, browser, playwright, **kwargs): ...`
+               and return a value; or
+            2) Be a script body which will be wrapped into an async function with access to
+               `page`, `context`, `browser`, `playwright`, `asyncio`, `time`.
+        - Output: JSON with status, logs (stdout), and result or error.
+        """
+        # Use CDP endpoint from env, defaulting to local 9222
+        cdp = (os.getenv("CDP_ENDPOINT") or "http://127.0.0.1:9222").strip()
+        timeout_s = max(1, int((req.timeout_ms or 60000) / 1000))
+
+        # Capture stdout from the user script
+        stdout_buf = io.StringIO()
+        page = None
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.connect_over_cdp(cdp)
+                contexts = browser.contexts
+                if not contexts:
+                    # For CDP connections there is usually a persistent default context
+                    raise HTTPException(status_code=500, detail="No browser contexts available over CDP.")
+                context = contexts[0]
+                page = await context.new_page()
+                if req.navigate_url:
+                    with contextlib.redirect_stdout(stdout_buf):
+                        print(f"[exec] Navigating to {req.navigate_url}...")
+                    await page.goto(req.navigate_url)
+
+                # Prepare execution environment
+                user_globals = {
+                    "__builtins__": __builtins__,
+                    "asyncio": asyncio,
+                    "time": time,
+                }
+                user_locals = {}
+
+                script = req.script
+
+                # If script defines an async run(), use it; otherwise wrap
+                if "async def run" in script:
+                    with contextlib.redirect_stdout(stdout_buf):
+                        print("[exec] Detected async run() entrypoint")
+                    exec(script, user_globals, user_locals)
+                    # Prefer locals, then globals
+                    fn = user_locals.get("run") or user_globals.get("run")
+                    if not callable(fn):
+                        raise HTTPException(status_code=400, detail="run is not callable")
+                    run_coro = fn(page=page, context=context, browser=browser, playwright=p)
+                else:
+                    # Indent the body into an async function wrapper
+                    body = "\n".join([("    " + line) if line.strip() else line for line in script.splitlines()])
+                    wrapped = (
+                        "async def __user_fn__(page, context, browser, playwright, asyncio, time):\n" + body + "\n"
+                    )
+                    exec(wrapped, user_globals, user_locals)
+                    fn = user_locals.get("__user_fn__")
+                    run_coro = fn(page, context, browser, p, asyncio, time)
+
+                # Execute with timeout and capture stdout
+                with contextlib.redirect_stdout(stdout_buf):
+                    result = await asyncio.wait_for(run_coro, timeout=timeout_s)
+
+                # Try to JSON-encode the result, fallback to str
+                try:
+                    _ = json.dumps(result)
+                    safe_result = result
+                except Exception:
+                    safe_result = str(result)
+
+                return {
+                    "status": "ok",
+                    "logs": stdout_buf.getvalue(),
+                    "result": safe_result,
+                }
+        except HTTPException:
+            # Re-raise structured errors
+            raise
+        except Exception as e:
+            return JSONResponse(status_code=500, content={
+                "status": "error",
+                "error": str(e),
+                "logs": stdout_buf.getvalue(),
+            })
+        finally:
+            # Best-effort page cleanup; avoid closing the shared CDP browser
+            try:
+                if page is not None:
+                    await page.close()
+            except Exception:
+                pass
 
 
     # In-memory task store: {task_id: {"status": str, "progress": [messages],

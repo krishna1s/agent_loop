@@ -37,3 +37,35 @@ GET http://localhost:8080/api/screenshots?limit=25
 
 # 7. List all screenshots (with base64)
 GET http://localhost:8080/api/screenshots?limit=5&include=base64
+
+###
+# 8. Execute a Playwright script (using async run())
+# Uses CDP_ENDPOINT env var or defaults to http://127.0.0.1:9222
+POST http://localhost:8080/api/execute
+Content-Type: application/json
+
+{
+  "timeout_ms": 30000,
+  "script": """
+async def run(page, context, browser, playwright, **kwargs):
+    print('Title before:', await page.title())
+    await page.goto('https://example.com')
+    print('Title after:', await page.title())
+    # return any JSON-serializable value
+    return {"url": page.url}
+"""
+}
+
+###
+# 9. Execute a Playwright script (body wrapped automatically)
+POST http://localhost:8080/api/execute
+Content-Type: application/json
+
+{
+  "navigate_url": "https://example.com",
+  "script": """
+print('Current URL is', page.url)
+await page.click('text=More information')
+print('After click URL:', page.url)
+"""
+}
