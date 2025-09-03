@@ -43,54 +43,53 @@ async def main():
         if contexts:
             ctx = contexts[0]
         else:
-            ctx = await browser.new_context()
+            ctx = await browser.new_context(viewport={"width": 1920, "height": 1080})
         pages = ctx.pages
         if pages:
             page = pages[0]
-        else:
-            page = await ctx.new_page()
-            await page.goto(TARGET_URL)
-        latest_path = os.path.join(OUTPUT_DIR, LATEST_FILE)
-        while True:
-            epoch_ms = int(time.time() * 1000)
-            hist_filename = f"shot_{epoch_ms}.png"
-            hist_path = os.path.join(OUTPUT_DIR, hist_filename)
-            tmp_latest = latest_path + ".tmp"
-            try:
-                # Take screenshot in-memory to avoid Playwright path / mime quirks
-                data = await page.screenshot(full_page=False, type="png")
-                # Write history file
-                with open(hist_path, 'wb') as f:
-                    f.write(data)
-                # Update latest atomically
+        
+        if page is not None:
+            latest_path = os.path.join(OUTPUT_DIR, LATEST_FILE)
+            while True:
+                epoch_ms = int(time.time() * 1000)
+                hist_filename = f"shot_{epoch_ms}.png"
+                hist_path = os.path.join(OUTPUT_DIR, hist_filename)
+                tmp_latest = latest_path + ".tmp"
                 try:
-                    with open(tmp_latest, 'wb') as f:
+                    # Take screenshot in-memory to avoid Playwright path / mime quirks
+                    data = await page.screenshot(full_page=False, type="png")
+                    # Write history file
+                    with open(hist_path, 'wb') as f:
                         f.write(data)
-                    os.replace(tmp_latest, latest_path)
-                except Exception as e:
-                    print(f"[screenshot_loop] latest copy error {e}", flush=True)
+                    # Update latest atomically
                     try:
-                        if os.path.exists(tmp_latest):
-                            os.remove(tmp_latest)
-                    except Exception:
-                        pass
-            except Exception as e:
-                print(f"[screenshot_loop] screenshot error {e}", flush=True)
-                traceback.print_exc()
-            # Rotation
-            try:
-                files = sorted(
-                    [f for f in os.listdir(OUTPUT_DIR) if f.startswith('shot_') and f.endswith('.png')]
-                )
-                if len(files) > MAX_HISTORY:
-                    for old in files[: len(files) - MAX_HISTORY]:
+                        with open(tmp_latest, 'wb') as f:
+                            f.write(data)
+                        os.replace(tmp_latest, latest_path)
+                    except Exception as e:
+                        print(f"[screenshot_loop] latest copy error {e}", flush=True)
                         try:
-                            os.remove(os.path.join(OUTPUT_DIR, old))
-                        except:  # noqa
+                            if os.path.exists(tmp_latest):
+                                os.remove(tmp_latest)
+                        except Exception:
                             pass
-            except Exception:
-                pass
-            await asyncio.sleep(INTERVAL)
+                except Exception as e:
+                    print(f"[screenshot_loop] screenshot error {e}", flush=True)
+                    traceback.print_exc()
+                # Rotation
+                try:
+                    files = sorted(
+                        [f for f in os.listdir(OUTPUT_DIR) if f.startswith('shot_') and f.endswith('.png')]
+                    )
+                    if len(files) > MAX_HISTORY:
+                        for old in files[: len(files) - MAX_HISTORY]:
+                            try:
+                                os.remove(os.path.join(OUTPUT_DIR, old))
+                            except:  # noqa
+                                pass
+                except Exception:
+                    pass
+                await asyncio.sleep(INTERVAL)
 
 if __name__ == "__main__":
     asyncio.run(main())

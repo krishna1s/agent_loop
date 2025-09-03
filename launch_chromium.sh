@@ -28,6 +28,8 @@ exec "$CHROMIUM_BIN" \
   --disable-gpu \
   --no-sandbox \
   --headless=new \
+  --window-size=1920,1080 \
+  --start-maximized \
   --hide-scrollbars \
   --disable-software-rasterizer \
   about:blank
