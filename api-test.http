@@ -69,3 +69,29 @@ await page.click('text=More information')
 print('After click URL:', page.url)
 """
 }
+
+###
+# 10. Execute a Playwright Test (JavaScript) spec using the runner
+POST http://localhost:8002/execute
+Content-Type: application/json
+
+{
+  "language": "javascript",
+  "timeout_ms": 60000,
+  "script": """
+import { test, expect } from '@playwright/test';
+
+test('Login to Playwright portal and confirm authentication', async ({ page }) => {
+  await page.goto('https://playwright.microsoft.com');
+  await expect(page.getByRole('link', { name: /Sign in/i })).toBeVisible();
+  await page.getByRole('link', { name: /Sign in/i }).click();
+  await expect(page.getByRole('textbox', { name: /email/i })).toBeVisible();
+  await page.getByRole('textbox', { name: /email/i }).fill('you@example.com');
+  await page.getByRole('button', { name: /Next/i }).click();
+  await expect(page.getByRole('textbox', { name: /password/i })).toBeVisible();
+  await page.getByRole('textbox', { name: /password/i }).fill('yourPassword');
+  await page.getByRole('button', { name: /Sign in/i }).click();
+  await expect(page.getByRole('heading', { name: /Workspace|Dashboard/i })).toBeVisible();
+});
+"""
+}

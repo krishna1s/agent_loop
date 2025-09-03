@@ -10,6 +10,9 @@ ProgressOnlyMagenticOneGroupChat so the UI receives concise, structured
 import json
 import io
 import contextlib
+import tempfile
+import shutil
+import textwrap
 import base64
 import logging
 import os
@@ -846,9 +849,10 @@ if "chainlit" not in sys.argv[0]:
 
     # --- Execute Playwright script against existing CDP browser ---
     class ExecuteScriptRequest(PydanticBaseModel):
-        script: str  # Python Playwright code. Either define `async def run(page, context, browser, playwright, **kwargs)` or provide a script body.
+        script: str  # Python or JavaScript Playwright code. See docstring for contract.
         timeout_ms: Optional[int] = 60000
         navigate_url: Optional[str] = None  # Optional initial navigation
+        language: Optional[str] = None  # 'python' or 'javascript'; auto-detected if not provided
 
     @app.post("/execute")
     async def execute_playwright_script(req: ExecuteScriptRequest):
@@ -868,6 +872,266 @@ if "chainlit" not in sys.argv[0]:
         cdp = (os.getenv("CDP_ENDPOINT") or "http://127.0.0.1:9222").strip()
         timeout_s = max(1, int((req.timeout_ms or 60000) / 1000))
 
+        # Detect language
+        lang = (req.language or "").strip().lower()
+        script_text = req.script or ""
+        if not lang:
+            js_indicators = ["import ", "export ", "require(", "getByRole(", "module.exports", "async ({ page }) =>"]
+            lang = "javascript" if any(tok in script_text for tok in js_indicators) else "python"
+
+        # JavaScript execution path
+        if lang == "javascript":
+            # Ensure node exists
+            if not shutil.which("node"):
+                raise HTTPException(status_code=500, detail="Node.js is not available on PATH; cannot run JavaScript.")
+
+            # Build JS runner that connects over CDP and executes user code
+            user_code = script_text
+
+            # If this looks like a Playwright Test spec, run it with the test runner
+            if ("@playwright/test" in user_code) or ("require('@playwright/test')" in user_code):
+                workdir = tempfile.mkdtemp(prefix='pwtest-')
+                fixtures_path = os.path.join(workdir, 'fixtures.mjs')
+                spec_path = os.path.join(workdir, 'spec.spec.mjs')
+                pkg_path = os.path.join(workdir, 'package.json')
+                config_path = os.path.join(workdir, 'playwright.config.mjs')
+
+                fixtures_src = textwrap.dedent(
+                                        """
+                                        import { chromium, test as base, expect } from '@playwright/test';
+                                        const CDP = process.env.CDP_ENDPOINT || 'http://127.0.0.1:9222';
+                                        export const test = base.extend({
+                                            browser: async ({}, use) => {
+                                                const browser = await chromium.connectOverCDP(CDP);
+                                                await use(browser);
+                                                // shared browser is managed externally; do not close
+                                            },
+                                            context: async ({}, use) => {
+                                                const browser = await chromium.connectOverCDP(CDP);
+                                                let context = browser.contexts()[0];
+                                                if (!context) context = await browser.newContext();
+                                                await use(context);
+                                            },
+                                            page: async ({ context }, use) => {
+                                                const page = await context.newPage();
+                                                // Ensure a desktop-like viewport so responsive sites expose desktop nav
+                                                try { await page.setViewportSize({ width: 1366, height: 900 }); } catch {}
+                                                // Make navigation/assertions a bit more forgiving
+                                                try { page.setDefaultTimeout(15000); page.setDefaultNavigationTimeout(30000); } catch {}
+                                                const url = process.env.NAVIGATE_URL;
+                                                if (url) {
+                                                    console.log('[exec] Navigating to ' + url + '...');
+                                                    await page.goto(url, { waitUntil: 'domcontentloaded' });
+                                                    try { await page.waitForLoadState('domcontentloaded'); } catch {}
+                                                }
+                                                await use(page);
+                                                try { await page.close(); } catch {}
+                                            }
+                                        });
+                                        export { expect };
+                                        """
+                                )
+
+                # Replace import to use our fixtures module so test() comes from fixtures
+                transformed = user_code.replace("@playwright/test", "./fixtures.mjs")
+
+                pkg_json = {
+                    "name": "tmp-playwright-exec",
+                    "private": True,
+                    "type": "module"
+                }
+                config_src = textwrap.dedent(
+                    """
+                    /** Minimal config; runner connects over CDP via fixtures */
+                    export default { timeout: 60000, expect: { timeout: 10000 } };
+                    """
+                )
+
+                try:
+                    with open(fixtures_path, 'w', encoding='utf-8') as f:
+                        f.write(fixtures_src)
+                    with open(spec_path, 'w', encoding='utf-8') as f:
+                        f.write(transformed)
+                    with open(pkg_path, 'w', encoding='utf-8') as f:
+                        f.write(json.dumps(pkg_json))
+                    with open(config_path, 'w', encoding='utf-8') as f:
+                        f.write(config_src)
+
+                    proc_env = os.environ.copy()
+                    proc_env['CDP_ENDPOINT'] = cdp
+                    if req.navigate_url:
+                        proc_env['NAVIGATE_URL'] = req.navigate_url
+                    # Help Node find globally installed modules if present
+                    proc_env['NODE_PATH'] = (proc_env.get('NODE_PATH', '') + ':/usr/lib/node_modules:/usr/local/lib/node_modules').strip(':')
+
+                    # Ensure @playwright/test is available in temp project
+                    create = asyncio.create_subprocess_exec
+                    install_proc = await create('npm', 'i', '--no-audit', '--no-fund', '--silent', '@playwright/test@latest',
+                                               cwd=workdir,
+                                               stdout=asyncio.subprocess.PIPE,
+                                               stderr=asyncio.subprocess.PIPE,
+                                               env=proc_env)
+                    try:
+                        _outs, _errs = await asyncio.wait_for(install_proc.communicate(), timeout=timeout_s)
+                    except asyncio.TimeoutError:
+                        try: install_proc.kill()
+                        except Exception: pass
+                        raise HTTPException(status_code=504, detail='Installing @playwright/test timed out')
+                    if install_proc.returncode != 0:
+                        raise HTTPException(status_code=500, detail='Failed to install @playwright/test')
+
+                    # Use npx to run playwright test for this temp project
+                    proc = await create('npx', '--yes', '@playwright/test', 'test', spec_path,
+                                        '--reporter=json',
+                                        cwd=workdir,
+                                        stdout=asyncio.subprocess.PIPE,
+                                        stderr=asyncio.subprocess.PIPE,
+                                        env=proc_env)
+                    try:
+                        outs, errs = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+                    except asyncio.TimeoutError:
+                        try: proc.kill()
+                        except Exception: pass
+                        raise HTTPException(status_code=504, detail='Playwright Test execution timed out')
+
+                    stdout = outs.decode('utf-8', errors='replace') if outs else ''
+                    stderr = errs.decode('utf-8', errors='replace') if errs else ''
+
+                    # Try to parse JSON reporter output
+                    report = None
+                    try:
+                        report = json.loads(stdout)
+                    except Exception:
+                        for line in stdout.splitlines()[::-1]:
+                            line = line.strip()
+                            if line.startswith('{') and line.endswith('}'):
+                                try:
+                                    report = json.loads(line)
+                                    break
+                                except Exception:
+                                    continue
+
+                    return {
+                        'status': 'ok',
+                        'exit_code': proc.returncode,
+                        'logs': stdout + (('\n' + stderr) if stderr else ''),
+                        'result': report,
+                    }
+                finally:
+                    try:
+                        shutil.rmtree(workdir, ignore_errors=True)
+                    except Exception:
+                        pass
+            # If user provided ESM 'import' lines, it's likely to fail under CJS. Warn early.
+            if "import " in user_code and "from" in user_code:
+                # We still attempt execution, but many environments require a project/module type
+                pass
+
+            runner = textwrap.dedent(
+                f"""
+                (async () => {{
+                  const playwright = require('playwright');
+                  const cdp = process.env.CDP_ENDPOINT || 'http://127.0.0.1:9222';
+                  const navigateUrl = process.env.NAVIGATE_URL || '';
+                  const browser = await playwright.chromium.connectOverCDP(cdp);
+                  let context = browser.contexts()[0];
+                  if (!context) {{ context = await browser.newContext(); }}
+                  const page = await context.newPage();
+                  if (navigateUrl) {{
+                    console.log('[exec] Navigating to ' + navigateUrl + '...');
+                    await page.goto(navigateUrl);
+                  }}
+                  let __result;
+                  try {{
+                    // Provide run() entrypoint if defined; else wrap body
+                    {''}
+                    // Begin user code injection
+                    {user_code}
+                    // End user code injection
+
+                    if (typeof run === 'function') {{
+                      __result = await run({{ page, context, browser, playwright }});
+                    }} else {{
+                      __result = await (async () => {{
+                        // If user provided top-level statements, they ran already.
+                        // Allow them to set globalThis.__result to pass a value.
+                        return globalThis.__result;
+                      }})();
+                    }}
+                    console.log('__RESULT__' + JSON.stringify(__result));
+                  }} catch (err) {{
+                    console.error('__ERROR__' + (err && err.stack || err && err.message || String(err)));
+                    process.exitCode = 1;
+                  }} finally {{
+                    try {{ await page.close(); }} catch {{}}
+                  }}
+                }})().catch(e => {{
+                  console.error('__ERROR__' + (e && e.stack || e && e.message || String(e)));
+                  process.exitCode = 1;
+                }});
+                """
+            )
+
+            # Write to temp file
+            tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False)
+            try:
+                tmp.write(runner)
+                tmp.flush()
+                tmp.close()
+
+                # Run with environment
+                proc_env = os.environ.copy()
+                proc_env['CDP_ENDPOINT'] = cdp
+                if req.navigate_url:
+                    proc_env['NAVIGATE_URL'] = req.navigate_url
+                proc_env['NODE_PATH'] = (proc_env.get('NODE_PATH', '') + ':/usr/lib/node_modules:/usr/local/lib/node_modules').strip(':')
+
+                create = asyncio.create_subprocess_exec
+                proc = await create('node', tmp.name,
+                                    stdout=asyncio.subprocess.PIPE,
+                                    stderr=asyncio.subprocess.PIPE,
+                                    env=proc_env)
+                try:
+                    outs, errs = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+                except asyncio.TimeoutError:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    raise HTTPException(status_code=504, detail='JavaScript execution timed out')
+
+                stdout = outs.decode('utf-8', errors='replace') if outs else ''
+                stderr = errs.decode('utf-8', errors='replace') if errs else ''
+                # Extract result
+                result = None
+                for line in stdout.splitlines():
+                    if line.startswith('__RESULT__'):
+                        try:
+                            result = json.loads(line[len('__RESULT__'):])
+                        except Exception:
+                            result = line[len('__RESULT__'):]
+                # Prefer JS result marker; else none
+                if proc.returncode and not result:
+                    # Try to surface error from stderr
+                    err_line = None
+                    for line in (stderr.splitlines() + stdout.splitlines()):
+                        if line.startswith('__ERROR__'):
+                            err_line = line[len('__ERROR__'):]
+                            break
+                    raise HTTPException(status_code=500, detail=err_line or 'JavaScript execution failed')
+
+                return {
+                    'status': 'ok',
+                    'logs': stdout + (('\n' + stderr) if stderr else ''),
+                    'result': result,
+                }
+            finally:
+                try:
+                    os.unlink(tmp.name)
+                except Exception:
+                    pass
+
+        # Python execution path (default)
         # Capture stdout from the user script
         stdout_buf = io.StringIO()
         page = None

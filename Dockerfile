@@ -35,10 +35,11 @@ RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright and browsers (Chromium + deps) and also Chrome channel
 RUN pip install playwright && playwright install --with-deps chromium
-RUN npm i -g @playwright/mcp@latest 
+RUN npm i -g @playwright/mcp@latest @playwright/test@latest
 
     # Set environment for MCP Playwright server to be local SSE
 ENV PLAYWRIGHT_MCP_SSE_URL="http://127.0.0.1:8931/sse"
+ENV NODE_PATH="/usr/local/lib/node_modules:/usr/lib/node_modules"
 
 # Copy app code and configs
 COPY . .
