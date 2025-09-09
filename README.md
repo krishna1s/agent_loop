@@ -1,3 +1,7 @@
+# Agent Loop - AI-Powered Testing Agent
+
+<!-- Agent Loop is an intelligent testing automation system that combines AI agents with browser automation to help with website testing and exploration. It uses Chainlit for the web interface, AutoGen for multi-agent orchestration, Playwright for browser control, and Azure OpenAI for intelligent decision-making. -->
+
 # Website Exploration Agent with React UI
 
 This project combines Microsoft AutoGen's multi-agent framework with a modern React frontend to create an intelligent website exploration agent that systematically explores websites and generates comprehensive test plans using real browser automation.
